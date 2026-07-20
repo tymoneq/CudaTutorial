@@ -1,0 +1,7 @@
+{
+    "[cuda-cpp]": {
+        "editor.defaultFormatter": "xaver.clang-format"
+    },
+    "editor.formatOnSave": true,
+    "clang-format.executable": "/home2/faculty/ttumialis/miniconda3/envs/cuda_env/bin/clang-format"
+}

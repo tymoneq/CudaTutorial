@@ -1,0 +1,17 @@
+{
+    "configurations": [
+        {
+            "name": "CUDA",
+            "includePath": [
+                "${workspaceFolder}/**",
+                "/home2/faculty/ttumialis/miniconda3/envs/cuda_env/include"
+            ],
+            "defines": [],
+            "compilerPath": "/home2/faculty/ttumialis/miniconda3/envs/cuda_env/bin/nvcc",
+            "cStandard": "c17",
+            "cppStandard": "c++17",
+            "intelliSenseMode": "linux-gcc-x64"
+        }
+    ],
+    "version": 4
+}
