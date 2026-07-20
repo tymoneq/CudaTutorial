@@ -1,0 +1,9 @@
+CompileFlags:
+  Add:
+    - "-x"
+    - "cuda"
+    - "--cuda-path=/home2/faculty/ttumialis/miniconda3/envs/cuda_env"
+    - "-I/home2/faculty/ttumialis/miniconda3/envs/cuda_env/include"
+    - "-I/home2/faculty/ttumialis/miniconda3/envs/cuda_env/targets/x86_64-linux/include"
+    - "--cuda-gpu-arch=sm_80"
+    - "-no-canonical-prefixes"
