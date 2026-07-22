@@ -70,7 +70,7 @@ int main() {
   double cpu_total_time = 0.0;
   for (int i = 0; i < 20; i++) {
     double start = get_time();
-    add_vector_cpu(h_a, h_b, h_c_cpu, N);
+    add_vector_cpu(h_a, h_b, h_c_gpu, N);
     double end_time = get_time();
     cpu_total_time += end_time - start;
   }
