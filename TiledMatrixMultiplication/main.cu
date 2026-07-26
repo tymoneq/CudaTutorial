@@ -4,7 +4,7 @@
 #include <cuda_runtime.h>
 #include <stdio.h>
 
-constexpr int M = 1 << 14;
+constexpr int M = 1 << 15;
 constexpr int BLOCKSIZE = 16;
 
 __global__ void FastMatrix(float *A, float *B, float *C, const int N) {
