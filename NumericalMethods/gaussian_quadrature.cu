@@ -3,6 +3,7 @@
 #include <iomanip>
 #include <iostream>
 
+#define N 16
 // more blocks but worst precision
 
 #define CUDA_CHECK(err)                                                        \
@@ -113,6 +114,56 @@ __global__ void gaussian_quadrature(const F f, const unsigned int n1,
   atomicAdd(global_sum, val);
 }
 
+template <typename F>
+__global__ void
+gaussian_quadratureWithReduction(const F f, const unsigned int n1,
+                                 const unsigned int n2, double *global_sum) {
+
+  __shared__ double Sum[N * N];
+
+  unsigned int idx = blockIdx.x * blockDim.x + threadIdx.x;
+  unsigned int idy = blockIdx.y * blockDim.y + threadIdx.y;
+
+  if (idx >= n1 || idy >= n2) {
+    return;
+  }
+
+  double sum = 0.0;
+
+  double2 range_x = calc_interval_pos(-1.0, 2.0, idx, n1);
+  double2 range_y = calc_interval_pos(-1.0, 2.0, idy, n2);
+
+  for (int i = 0; i < 2; i++) {
+    double u = rescale_interval(range_x, TwoPointGaussian::node(i));
+    double Jacobian = calc_jacobian(u);
+    for (int j = 0; j < 2; j++) {
+
+      double v = rescale_interval(range_y, TwoPointGaussian::node(j));
+
+      double2 polar = calc_polar(u, v);
+
+      double2 cartesian = to_cartesian(polar);
+
+      sum += Jacobian * f(cartesian.x, cartesian.y);
+    }
+  }
+  //  reduction
+  unsigned int tid = threadIdx.y + (threadIdx.x * blockDim.y);
+  Sum[tid] =
+      sum * (1 / static_cast<double>(n1)) * (1 / static_cast<double>(n2));
+  __syncthreads();
+
+  for (unsigned int s = blockDim.x * blockDim.y / 2; s > 0; s >>= 1) {
+    if (tid < s) {
+      Sum[tid] += Sum[tid + s];
+    }
+    __syncthreads();
+  }
+
+  if (threadIdx.x == 0 && threadIdx.y == 0)
+    atomicAdd(global_sum, Sum[0]);
+}
+
 template <typename KernelLauncher>
 float benchmark_kernel(KernelLauncher launch, double *d_sum,
                        int warmup_runs = 5, int timed_runs = 25) {
@@ -147,11 +198,11 @@ float benchmark_kernel(KernelLauncher launch, double *d_sum,
 int main(int argc, char *argv[]) {
   const unsigned int n1 = 2048;
   const unsigned int n2 = 2048;
-  const unsigned int n = 16;
 
   auto f = [] __device__(double x, double y) { return x * x + y * y; };
   double h_global_sum_slow = 0.0;
   double h_global_sum_fast = 0.0;
+  double h_global_sum_reduction = 0.0;
   double *d_global_sum;
 
   // cuda malloc
@@ -174,7 +225,7 @@ int main(int argc, char *argv[]) {
              cudaMemcpyDeviceToHost);
   // --- Configuration 2: New 16x16 Block (256 intervals per block, 256
   // threads/block) ---
-  dim3 block_new(n, n);
+  dim3 block_new(N, N);
   dim3 grid_new((n1 + block_new.x - 1) / block_new.x,
                 (n2 + block_new.y - 1) / block_new.y);
 
@@ -187,19 +238,43 @@ int main(int argc, char *argv[]) {
   cudaMemcpy(&h_global_sum_fast, d_global_sum, sizeof(double),
              cudaMemcpyDeviceToHost);
 
+  // --- Configuration 3: New 16x16 Block (256 intervals per block, 256
+  // threads/block) ---
+  float time_new_ms_reduction = benchmark_kernel(
+      [&]() {
+        gaussian_quadratureWithReduction<<<grid_new, block_new>>>(f, n1, n2,
+                                                                  d_global_sum);
+      },
+      d_global_sum);
+
+  cudaMemcpy(&h_global_sum_reduction, d_global_sum, sizeof(double),
+             cudaMemcpyDeviceToHost);
+
   double err = std::abs(h_global_sum_fast - h_global_sum_slow);
 
   // --- Print Results ---
   std::cout << std::fixed << std::setprecision(16);
   std::cout << "Result slow: " << h_global_sum_slow << "\n";
   std::cout << "Result fast: " << h_global_sum_fast << "\n";
-  std::cout << "Error: " << err << "\n";
+  std::cout << "Result reduction: " << h_global_sum_reduction << "\n";
+  std::cout << "Error fast-slow: " << err << "\n";
+  std::cout << "Error reduction-slow: "
+            << std::abs(h_global_sum_reduction - h_global_sum_slow) << "\n";
   std::cout << "Grid size: " << n1 << " x " << n2 << " (" << (n1 * n2)
             << " tiles)\n";
   std::cout << "--------------------------------------------------\n";
   std::cout << "Old (2x2 blocks):    " << time_old_ms << " ms\n";
   std::cout << "New (16x16 blocks):  " << time_new_ms << " ms\n";
+  std::cout << "New Reduction (16x16 blocks):  " << time_new_ms_reduction
+            << " ms\n";
+  std::cout << "--------------------------------------------------\n";
   std::cout << "Speedup:             " << (time_old_ms / time_new_ms)
             << "x faster\n";
+  std::cout << "Reduction (16x16 blocks):  " << time_new_ms_reduction
+            << " ms\n";
+  std::cout << "Speedup:             " << (time_new_ms / time_new_ms_reduction)
+            << "x faster\n";
+  std::cout << "Total Speedup:             "
+            << (time_old_ms / time_new_ms_reduction) << "x faster\n";
   return 0;
 }
