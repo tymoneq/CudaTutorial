@@ -199,7 +199,8 @@ int main(int argc, char *argv[]) {
   const unsigned int n1 = 2048;
   const unsigned int n2 = 2048;
 
-  auto f = [] __device__(double x, double y) { return x * x + y * y; };
+  const auto f = [] __device__(double x, double y) { return x * x; };
+  const double result = PI/4;
   double h_global_sum_slow = 0.0;
   double h_global_sum_fast = 0.0;
   double h_global_sum_reduction = 0.0;
@@ -250,16 +251,15 @@ int main(int argc, char *argv[]) {
   cudaMemcpy(&h_global_sum_reduction, d_global_sum, sizeof(double),
              cudaMemcpyDeviceToHost);
 
-  double err = std::abs(h_global_sum_fast - h_global_sum_slow);
-
   // --- Print Results ---
   std::cout << std::fixed << std::setprecision(16);
   std::cout << "Result slow: " << h_global_sum_slow << "\n";
   std::cout << "Result fast: " << h_global_sum_fast << "\n";
   std::cout << "Result reduction: " << h_global_sum_reduction << "\n";
-  std::cout << "Error fast-slow: " << err << "\n";
-  std::cout << "Error reduction-slow: "
-            << std::abs(h_global_sum_reduction - h_global_sum_slow) << "\n";
+  std::cout << "Error Slow: " << std::abs(h_global_sum_slow - result) << "\n";
+  std::cout << "Error fast: " << std::abs(h_global_sum_fast - result) << "\n";
+  std::cout << "Error reduction: " << std::abs(h_global_sum_reduction - result)
+            << "\n";
   std::cout << "Grid size: " << n1 << " x " << n2 << " (" << (n1 * n2)
             << " tiles)\n";
   std::cout << "--------------------------------------------------\n";
