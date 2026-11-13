@@ -10,7 +10,7 @@
   do {                                                                         \
     cudaError_t error = (err);                                                 \
     if (error != cudaSuccess) {                                                \
-      printf("CUDA Błąd: %s w pliku %s:%d\n", cudaGetErrorString(error),       \
+      printf("CUDA Error: %s w pliku %s:%d\n", cudaGetErrorString(error),      \
              __FILE__, __LINE__);                                              \
       exit(EXIT_FAILURE);                                                      \
     }                                                                          \
@@ -124,28 +124,25 @@ gaussian_quadratureWithReduction(const F f, const unsigned int n1,
 
   unsigned int idx = blockIdx.x * blockDim.x + threadIdx.x;
   unsigned int idy = blockIdx.y * blockDim.y + threadIdx.y;
-
-  if (idx >= n1 || idy >= n2) {
-    return;
-  }
-
   double sum = 0.0;
+  if (idx < n1 && idy < n2) {
 
-  double2 range_x = calc_interval_pos(-1.0, 2.0, idx, n1);
-  double2 range_y = calc_interval_pos(-1.0, 2.0, idy, n2);
+    double2 range_x = calc_interval_pos(-1.0, 2.0, idx, n1);
+    double2 range_y = calc_interval_pos(-1.0, 2.0, idy, n2);
 
-  for (int i = 0; i < 2; i++) {
-    double u = rescale_interval(range_x, TwoPointGaussian::node(i));
-    double Jacobian = calc_jacobian(u);
-    for (int j = 0; j < 2; j++) {
+    for (int i = 0; i < 2; i++) {
+      double u = rescale_interval(range_x, TwoPointGaussian::node(i));
+      double Jacobian = calc_jacobian(u);
+      for (int j = 0; j < 2; j++) {
 
-      double v = rescale_interval(range_y, TwoPointGaussian::node(j));
+        double v = rescale_interval(range_y, TwoPointGaussian::node(j));
 
-      double2 polar = calc_polar(u, v);
+        double2 polar = calc_polar(u, v);
 
-      double2 cartesian = to_cartesian(polar);
+        double2 cartesian = to_cartesian(polar);
 
-      sum += Jacobian * f(cartesian.x, cartesian.y);
+        sum += Jacobian * f(cartesian.x, cartesian.y);
+      }
     }
   }
   //  reduction
@@ -177,28 +174,24 @@ gaussian_quadratureWithReductionWithoutAtomic(const F f, const unsigned int n1,
 
   unsigned int idx = blockIdx.x * blockDim.x + threadIdx.x;
   unsigned int idy = blockIdx.y * blockDim.y + threadIdx.y;
-
-  if (idx >= n1 || idy >= n2) {
-    return;
-  }
-
   double sum = 0.0;
+  if (idx < n1 && idy < n2) {
+    double2 range_x = calc_interval_pos(-1.0, 2.0, idx, n1);
+    double2 range_y = calc_interval_pos(-1.0, 2.0, idy, n2);
 
-  double2 range_x = calc_interval_pos(-1.0, 2.0, idx, n1);
-  double2 range_y = calc_interval_pos(-1.0, 2.0, idy, n2);
+    for (int i = 0; i < 2; i++) {
+      double u = rescale_interval(range_x, TwoPointGaussian::node(i));
+      double Jacobian = calc_jacobian(u);
+      for (int j = 0; j < 2; j++) {
 
-  for (int i = 0; i < 2; i++) {
-    double u = rescale_interval(range_x, TwoPointGaussian::node(i));
-    double Jacobian = calc_jacobian(u);
-    for (int j = 0; j < 2; j++) {
+        double v = rescale_interval(range_y, TwoPointGaussian::node(j));
 
-      double v = rescale_interval(range_y, TwoPointGaussian::node(j));
+        double2 polar = calc_polar(u, v);
 
-      double2 polar = calc_polar(u, v);
+        double2 cartesian = to_cartesian(polar);
 
-      double2 cartesian = to_cartesian(polar);
-
-      sum += Jacobian * f(cartesian.x, cartesian.y);
+        sum += Jacobian * f(cartesian.x, cartesian.y);
+      }
     }
   }
   //  reduction
@@ -215,7 +208,8 @@ gaussian_quadratureWithReductionWithoutAtomic(const F f, const unsigned int n1,
   }
 
   if (threadIdx.x == 0 && threadIdx.y == 0) {
-    global_sum[blockIdx.y + blockIdx.x * blockDim.y] = Sum[0];
+    unsigned int block_id = blockIdx.y * gridDim.x + blockIdx.x;
+    global_sum[block_id] = Sum[0];
   }
 }
 
@@ -241,11 +235,11 @@ __global__ void ReductionKernel(double *ReductionSum, const unsigned int n) {
 }
 
 template <typename KernelLauncher>
-float benchmark_kernel(KernelLauncher launch, double *d_sum,
+float benchmark_kernel(KernelLauncher launch, double *d_sum, size_t count = 1,
                        int warmup_runs = 5, int timed_runs = 25) {
   // Warm-up runs (not timed)
   for (int i = 0; i < warmup_runs; ++i) {
-    cudaMemset(d_sum, 0, sizeof(double));
+    cudaMemset(d_sum, 0, sizeof(double) * count);
     launch();
   }
   cudaDeviceSynchronize();
@@ -256,7 +250,7 @@ float benchmark_kernel(KernelLauncher launch, double *d_sum,
 
   cudaEventRecord(start);
   for (int i = 0; i < timed_runs; i++) {
-    cudaMemset(d_sum, 0, sizeof(double));
+    cudaMemset(d_sum, 0, sizeof(double) * count);
     launch();
   }
   cudaEventRecord(stop);
@@ -339,8 +333,8 @@ int main(int argc, char *argv[]) {
   cudaMemcpy(&h_global_sum_reduction, d_global_sum, sizeof(double),
              cudaMemcpyDeviceToHost);
 
-  cudaMemcpy(&h_number_of_atomics_adds, d_number_of_atomics_adds, sizeof(int),
-             cudaMemcpyDeviceToHost);
+  CUDA_CHECK(cudaMemcpy(&h_number_of_atomics_adds, d_number_of_atomics_adds,
+                        sizeof(int), cudaMemcpyDeviceToHost));
 
   // --- Configuration 4: New 16x16 Block without atomic (256 intervals per
   // block, 256
@@ -350,52 +344,29 @@ int main(int argc, char *argv[]) {
   double h_ReductionSum = 0.0;
   double *d_ReductionSum;
   unsigned int size_reduction = n1 * n2;
-  cudaMalloc(&d_ReductionSum, size_reduction);
-  cudaMemset(&d_ReductionSum, 0.0, size_reduction);
+  CUDA_CHECK(cudaMalloc(&d_ReductionSum, size_reduction * sizeof(double)));
+  CUDA_CHECK(cudaMemset(d_ReductionSum, 0.0, size_reduction * sizeof(double)));
 
-  //  float time_new_ms_reduction_without_atomic = benchmark_kernel(
-  //      [&]() {
-  //        gaussian_quadratureWithReductionWithoutAtomic<<<grid_new,
-  //        block_new>>>(
-  //            f, n1, n2, d_global_sum);
-  //        const int reduce_threads = 1024;
+  float time_new_ms_reduction_without_atomic = benchmark_kernel(
+      [&]() {
+        gaussian_quadratureWithReductionWithoutAtomic<<<grid_new, block_new>>>(
+            f, n1, n2, d_ReductionSum);
+        const int reduce_threads = 1024;
+        unsigned int local_size_reduction = size_reduction;
+        while (local_size_reduction > 1) {
+          int reduce_blocks =
+              (local_size_reduction + reduce_threads - 1) / reduce_threads;
+          size_t shared_mem = reduce_threads * sizeof(double);
 
-  //        while (size_reduction > 1) {
-  //          int reduce_blocks =
-  //              (size_reduction + reduce_threads - 1) / reduce_threads;
-  //          size_t shared_mem = reduce_threads * sizeof(double);
+          ReductionKernel<<<reduce_blocks, reduce_threads, shared_mem>>>(
+              d_ReductionSum, local_size_reduction);
 
-  //          ReductionKernel<<<reduce_blocks, reduce_threads, shared_mem>>>(
-  //              d_global_sum, size_reduction);
+          local_size_reduction = reduce_blocks;
+        }
+      },
+      d_ReductionSum, size_reduction);
 
-  //          size_reduction = reduce_blocks;
-  //        }
-  //      },
-  //      d_global_sum);
 
-  gaussian_quadratureWithReductionWithoutAtomic<<<grid_new, block_new>>>(
-      f, n1, n2, d_ReductionSum);
-  const int reduce_threads = 1024;
-
-  cudaError_t err_launch = cudaGetLastError();
-  if (err_launch != cudaSuccess) {
-    std::cerr << "Błąd uruchomienia kernela: 1 " << cudaGetErrorString(err_launch)
-              << std::endl;
-  }
-
-  while (size_reduction > 1) {
-    int reduce_blocks = (size_reduction + reduce_threads - 1) / reduce_threads;
-    size_t shared_mem = reduce_threads * sizeof(double);
-
-    ReductionKernel<<<reduce_blocks, reduce_threads, shared_mem>>>(
-        d_ReductionSum, size_reduction);
-    cudaError_t err_launch = cudaGetLastError();
-    if (err_launch != cudaSuccess) {
-      std::cerr << "Błąd uruchomienia kernela: 2"
-                << cudaGetErrorString(err_launch) << std::endl;
-    }
-    size_reduction = reduce_blocks;
-  }
   cudaMemcpy(&h_ReductionSum, d_ReductionSum, sizeof(double),
              cudaMemcpyDeviceToHost);
 
