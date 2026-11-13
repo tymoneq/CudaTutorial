@@ -1,7 +1,10 @@
 #include <cmath>
 #include <cuda_runtime.h>
+#include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <tuple>
+#include <vector>
 
 #define N 16
 // more blocks but worst precision
@@ -117,8 +120,7 @@ __global__ void gaussian_quadrature(const F f, const unsigned int n1,
 template <typename F>
 __global__ void
 gaussian_quadratureWithReduction(const F f, const unsigned int n1,
-                                 const unsigned int n2, double *global_sum,
-                                 int *number_of_atomic_adds) {
+                                 const unsigned int n2, double *global_sum) {
 
   __shared__ double Sum[N * N];
 
@@ -160,7 +162,6 @@ gaussian_quadratureWithReduction(const F f, const unsigned int n1,
 
   if (threadIdx.x == 0 && threadIdx.y == 0) {
     atomicAdd(global_sum, Sum[0]);
-    atomicAdd(number_of_atomic_adds, 1);
   }
 }
 
@@ -234,185 +235,210 @@ __global__ void ReductionKernel(double *ReductionSum, const unsigned int n) {
   }
 }
 
-template <typename KernelLauncher>
-float benchmark_kernel(KernelLauncher launch, double *d_sum, size_t count = 1,
-                       int warmup_runs = 5, int timed_runs = 25) {
-  // Warm-up runs (not timed)
-  for (int i = 0; i < warmup_runs; ++i) {
-    cudaMemset(d_sum, 0, sizeof(double) * count);
-    launch();
+template <typename T> struct CudaTestCase {
+  T func;
+  double exactVal;
+  std::string name;
+};
+
+template <typename F> CudaTestCase(F, double, const char *) -> CudaTestCase<F>;
+
+template <typename Tuple, typename Func>
+void for_each_in_tuple(const Tuple &t, Func &&f) {
+  std::apply([&](const auto &...args) { (f(args), ...); }, t);
+}
+
+struct KernelBenchmark {
+  std::string kernel_name;
+  double result;
+  double error;
+};
+
+void print_console_table(const std::string &func_name, unsigned int n1,
+                         unsigned int n2,
+                         const std::vector<KernelBenchmark> &results) {
+  unsigned long long total_points = 4ULL * n1 * n2;
+
+  std::cout << "\n============================================================="
+               "===================\n";
+  std::cout << " Funkcja: " << func_name << " | Siatka: " << n1 << "x" << n2
+            << " | Punkty Gaussa: " << total_points << "\n";
+  std::cout << "==============================================================="
+               "=================\n";
+
+  std::cout << std::left << std::setw(30) << "Wariant kernela" << std::right
+            << std::setw(22) << "Wynik" << std::setw(16) << "Blad bezwzg."
+            << "\n";
+  std::cout << "---------------------------------------------------------------"
+               "-----------------\n";
+
+  for (const auto &r : results) {
+    std::cout << std::left << std::setw(30) << r.kernel_name << std::right
+              << std::fixed << std::setprecision(16) << std::setw(22)
+              << r.result << std::scientific << std::setprecision(2)
+              << std::setw(16) << r.error << std::fixed << std::setprecision(4)
+              << "\n";
   }
-  cudaDeviceSynchronize();
+  std::cout << "==============================================================="
+               "=================\n";
+}
+void export_to_csv(const std::string &filename, const std::string &func_name,
+                   unsigned int n1, unsigned int n2,
+                   const std::vector<KernelBenchmark> &results,
+                   bool write_header = false) {
+  // Otwieramy w trybie dopisywania (std::ios::app), żeby zbierać kolejne testy
+  // w jednym pliku
+  std::ofstream file(filename, std::ios::app);
+  if (!file.is_open())
+    return;
 
-  cudaEvent_t start, stop;
-  cudaEventCreate(&start);
-  cudaEventCreate(&stop);
-
-  cudaEventRecord(start);
-  if (count == 1) {
-    for (int i = 0; i < timed_runs; i++) {
-      cudaMemset(d_sum, 0, sizeof(double) * count);
-      launch();
-    }
-  } else {
-    cudaMemset(d_sum, 0, sizeof(double) * count);
-    for (int i = 0; i < timed_runs; i++) {
-      launch();
-    }
+  if (write_header) {
+    file << "Function,Grid_N1,Grid_N2,Total_Points,Kernel,Result,Abs_Error\n";
   }
-  cudaEventRecord(stop);
-  cudaEventSynchronize(stop);
 
-  float total_ms = 0.0f;
-  cudaEventElapsedTime(&total_ms, start, stop);
+  unsigned long long total_points = 4ULL * n1 * n2;
 
-  cudaEventDestroy(start);
-  cudaEventDestroy(stop);
-
-  return total_ms / timed_runs; // Average time per kernel execution (ms)
+  for (const auto &r : results) {
+    file << "\"" << func_name << "\"," << n1 << "," << n2 << "," << total_points
+         << ","
+         << "\"" << r.kernel_name
+         << "\","
+         // setprecision(17) gwarantuje zapis pełnej precyzji IEEE-754 double
+         // bez utraty bitów
+         << std::fixed << std::setprecision(17) << r.result << ","
+         << std::scientific << std::setprecision(6) << r.error << ","
+         << "\n";
+  }
 }
 
 int main(int argc, char *argv[]) {
-  const unsigned int n1 = 2048;
-  const unsigned int n2 = 2048;
+  const auto f1 = [] __device__(double x, double y) -> double { return 1.0; };
+  const auto f2 = [] __device__(double x, double y) -> double {
+    return x * x + y * y;
+  };
+  const auto f3 = [] __device__(double x, double y) -> double { return x * x; };
+  const auto f4 = [] __device__(double x, double y) -> double { return x; };
+  const auto f5 = [] __device__(double x, double y) -> double {
+    double r2 = x * x + y * y;
+    return r2 * r2;
+  };
+  const int reduce_threads = 1024;
+  // std::make_tuple przechowuje 5 różnych typów CudaTestCase<decltype(f_i)>
+  auto allFunctions =
+      std::make_tuple(CudaTestCase{f1, PI, "f(x,y) = 1"},
+                      CudaTestCase{f2, PI / 2.0, "f(x,y) = x^2 + y^2"},
+                      CudaTestCase{f3, PI / 4.0, "f(x,y) = x^2"},
+                      CudaTestCase{f4, 0.0, "f(x,y) = x"},
+                      CudaTestCase{f5, PI / 3.0, "f(x,y) = (x^2 + y^2)^2"});
 
-  const auto f = [] __device__(double x, double y) { return 1; };
-  const double result = PI ;
   std::cout << std::fixed << std::setprecision(16);
-  std::cout << "Function " << "1" << " result " << result << "\n";
-  double h_global_sum_slow = 0.0;
-  double h_global_sum_fast = 0.0;
-  double h_global_sum_reduction = 0.0;
-  double *d_global_sum;
 
-  // cuda malloc
-  CUDA_CHECK(cudaMalloc(&d_global_sum, sizeof(double)));
-  CUDA_CHECK(cudaMemset(d_global_sum, 0, sizeof(double)));
+  bool is_first_row = true;
+  std::ofstream("benchmark_results.csv", std::ios::trunc).close();
 
-  // --- Configuration 1: Old 2x2 Block (1 interval per block, 4 threads/block)
-  // #############################################################
-  // #############################################################
-  dim3 block_old(2, 2);
-  dim3 grid_old(n1, n2);
+  for_each_in_tuple(
+      allFunctions,
+      [&](const auto &test) {
+        std::cout << test.name << "\n";
 
-  float time_old_ms = benchmark_kernel(
-      [&]() {
-        gaussian_quadratureSlow<<<grid_old, block_old>>>(f, n1, n2,
-                                                         d_global_sum);
-      },
-      d_global_sum);
+        for (int block_size = 512; block_size <= 4096; block_size *= 2) {
 
-  cudaMemcpy(&h_global_sum_slow, d_global_sum, sizeof(double),
-             cudaMemcpyDeviceToHost);
+          double h_global_sum_slow = 0.0;
+          double h_global_sum_fast = 0.0;
+          double h_global_sum_reduction = 0.0;
+          double *d_global_sum;
+          CUDA_CHECK(cudaMalloc(&d_global_sum, sizeof(double)));
+          CUDA_CHECK(cudaMemset(d_global_sum, 0, sizeof(double)));
 
-  // --- Configuration 2: New 16x16 Block (256 intervals per block, 256
-  // #############################################################
-  // #############################################################
-  dim3 block_new(N, N);
-  dim3 grid_new((n1 + block_new.x - 1) / block_new.x,
-                (n2 + block_new.y - 1) / block_new.y);
+          // Kernel 1
+          // #############################################################
+          // #############################################################
+          dim3 block_old(2, 2);
+          dim3 grid_old(block_size, block_size);
 
-  float time_new_ms = benchmark_kernel(
-      [&]() {
-        gaussian_quadrature<<<grid_new, block_new>>>(f, n1, n2, d_global_sum);
-      },
-      d_global_sum);
+          gaussian_quadratureSlow<<<grid_old, block_old>>>(
+              test.func, block_size, block_size, d_global_sum);
 
-  cudaMemcpy(&h_global_sum_fast, d_global_sum, sizeof(double),
-             cudaMemcpyDeviceToHost);
+          cudaMemcpy(&h_global_sum_slow, d_global_sum, sizeof(double),
+                     cudaMemcpyDeviceToHost);
 
-  // --- Configuration 3: New 16x16 Block with Reduction(256 intervals per
-  // block, 256
-  // #############################################################
-  // #############################################################
-  int h_number_of_atomics_adds = 0;
-  int *d_number_of_atomics_adds;
+          // kernel 2
+          // #############################################################
+          // #############################################################
+          CUDA_CHECK(cudaMemset(d_global_sum, 0, sizeof(double)));
+          dim3 block_new(N, N);
+          dim3 grid_new((block_size + block_new.x - 1) / block_new.x,
+                        (block_size + block_new.y - 1) / block_new.y);
 
-  CUDA_CHECK(cudaMalloc(&d_number_of_atomics_adds, sizeof(int)));
+          gaussian_quadrature<<<grid_new, block_new>>>(
+              test.func, block_size, block_size, d_global_sum);
+          cudaMemcpy(&h_global_sum_fast, d_global_sum, sizeof(double),
+                     cudaMemcpyDeviceToHost);
 
-  cudaMemset(d_number_of_atomics_adds, 0, sizeof(int));
+          // kernel 3
+          // #############################################################
+          // #############################################################
+          CUDA_CHECK(cudaMemset(d_global_sum, 0, sizeof(double)));
+          gaussian_quadratureWithReduction<<<grid_new, block_new>>>(
+              test.func, block_size, block_size, d_global_sum);
+          cudaMemcpy(&h_global_sum_reduction, d_global_sum, sizeof(double),
+                     cudaMemcpyDeviceToHost);
 
-  float time_new_ms_reduction = benchmark_kernel(
-      [&]() {
-        gaussian_quadratureWithReduction<<<grid_new, block_new>>>(
-            f, n1, n2, d_global_sum, d_number_of_atomics_adds);
-      },
-      d_global_sum);
+          // kernel 4
+          // #############################################################
+          // #############################################################
+          double h_ReductionSum = 0.0;
+          double *d_ReductionSum;
+          unsigned int size_reduction = block_size * block_size;
+          CUDA_CHECK(
+              cudaMalloc(&d_ReductionSum, size_reduction * sizeof(double)));
+          CUDA_CHECK(
+              cudaMemset(d_ReductionSum, 0.0, size_reduction * sizeof(double)));
 
-  cudaMemcpy(&h_global_sum_reduction, d_global_sum, sizeof(double),
-             cudaMemcpyDeviceToHost);
+          gaussian_quadratureWithReductionWithoutAtomic<<<grid_new,
+                                                          block_new>>>(
+              test.func, block_size, block_size, d_ReductionSum);
 
-  CUDA_CHECK(cudaMemcpy(&h_number_of_atomics_adds, d_number_of_atomics_adds,
-                        sizeof(int), cudaMemcpyDeviceToHost));
+          unsigned int local_size_reduction = size_reduction;
+          while (local_size_reduction > 1) {
+            int reduce_blocks =
+                (local_size_reduction + reduce_threads - 1) / reduce_threads;
+            size_t shared_mem = reduce_threads * sizeof(double);
 
-  // --- Configuration 4: New 16x16 Block without atomic (256 intervals per
-  // block, 256
-  // #############################################################
-  // #############################################################
+            ReductionKernel<<<reduce_blocks, reduce_threads, shared_mem>>>(
+                d_ReductionSum, local_size_reduction);
 
-  double h_ReductionSum = 0.0;
-  double *d_ReductionSum;
-  unsigned int size_reduction = n1 * n2;
-  CUDA_CHECK(cudaMalloc(&d_ReductionSum, size_reduction * sizeof(double)));
-  CUDA_CHECK(cudaMemset(d_ReductionSum, 0.0, size_reduction * sizeof(double)));
+            local_size_reduction = reduce_blocks;
+          }
+          cudaMemcpy(&h_ReductionSum, d_ReductionSum, sizeof(double),
+                     cudaMemcpyDeviceToHost);
 
-  float time_new_ms_reduction_without_atomic = benchmark_kernel(
-      [&]() {
-        gaussian_quadratureWithReductionWithoutAtomic<<<grid_new, block_new>>>(
-            f, n1, n2, d_ReductionSum);
-        const int reduce_threads = 1024;
-        unsigned int local_size_reduction = size_reduction;
-        while (local_size_reduction > 1) {
-          int reduce_blocks =
-              (local_size_reduction + reduce_threads - 1) / reduce_threads;
-          size_t shared_mem = reduce_threads * sizeof(double);
+          // --- Print Results -------------------------------------------
+          // #############################################################
+          // #############################################################
+          // --- Print Results ---
 
-          ReductionKernel<<<reduce_blocks, reduce_threads, shared_mem>>>(
-              d_ReductionSum, local_size_reduction);
+          std::vector<KernelBenchmark> kernelBenchmark = {
+              {"slow", h_global_sum_slow,
+               std::abs(h_global_sum_slow - test.exactVal)},
+              {"fast", h_global_sum_fast,
+               std::abs(h_global_sum_fast - test.exactVal)},
+              {"reduction with atomic", h_global_sum_reduction,
+               std::abs(test.exactVal - h_global_sum_reduction)},
+              {"reduction without atomic", h_ReductionSum,
+               std::abs(h_ReductionSum - test.exactVal)}};
 
-          local_size_reduction = reduce_blocks;
+          print_console_table(test.name, block_size, block_size,
+                              kernelBenchmark);
+          export_to_csv("benchmark_results.csv", test.name, block_size,
+                        block_size, kernelBenchmark, is_first_row);
+          is_first_row = false;
+          cudaFree(d_ReductionSum);
+          cudaFree(d_global_sum);
         }
-      },
-      d_ReductionSum, size_reduction);
+      }
 
-  cudaMemcpy(&h_ReductionSum, d_ReductionSum, sizeof(double),
-             cudaMemcpyDeviceToHost);
+  );
 
-  // --- Print Results -------------------------------------------
-  // #############################################################
-  // #############################################################
-  // --- Print Results ---
-
-  std::cout << "Result slow: " << h_global_sum_slow << "\n";
-  std::cout << "Result fast: " << h_global_sum_fast << "\n";
-  std::cout << "Result reduction: " << h_global_sum_reduction << "\n";
-  std::cout << "Result reduction without atomic: " << h_ReductionSum << "\n";
-  std::cout << "Error Slow: " << std::abs(h_global_sum_slow - result) << "\n";
-  std::cout << "Error fast: " << std::abs(h_global_sum_fast - result) << "\n";
-  std::cout << "Error reduction: " << std::abs(result - h_global_sum_reduction)
-            << "\n";
-  std::cout << "Error reduction without atomic: "
-            << std::abs(h_ReductionSum - result) << "\n";
-  std::cout << "Grid size: " << n1 << " x " << n2 << " (" << (n1 * n2)
-            << " tiles)\n";
-  std::cout << "--------------------------------------------------\n";
-  std::cout << "Old (2x2 blocks):    " << time_old_ms << " ms\n";
-  std::cout << "New (16x16 blocks):  " << time_new_ms << " ms\n";
-  std::cout << "New Reduction (16x16 blocks):  " << time_new_ms_reduction
-            << " ms\n";
-  std::cout << "New Reduction without atomic(16x16 blocks):  "
-            << time_new_ms_reduction_without_atomic << "ms\n";
-  std::cout << "--------------------------------------------------\n";
-  std::cout << "Speedup:             " << (time_old_ms / time_new_ms)
-            << "x faster\n";
-  std::cout << "Speedup:             " << (time_new_ms / time_new_ms_reduction)
-            << "x faster\n";
-  std::cout << "Total Speedup:             "
-            << (time_old_ms / time_new_ms_reduction_without_atomic)
-            << "x faster\n";
-
-  cudaFree(d_ReductionSum);
-  cudaFree(d_number_of_atomics_adds);
-  cudaFree(d_global_sum);
   return 0;
 }
