@@ -16,7 +16,7 @@
     }                                                                          \
   } while (0)
 
-constexpr double PI = 3.141592653589793238462643383279502884;
+constexpr double PI = 3.1415926535897932;
 
 struct TwoPointGaussian {
   __host__ __device__ static constexpr double node(int i) {
@@ -249,9 +249,16 @@ float benchmark_kernel(KernelLauncher launch, double *d_sum, size_t count = 1,
   cudaEventCreate(&stop);
 
   cudaEventRecord(start);
-  for (int i = 0; i < timed_runs; i++) {
+  if (count == 1) {
+    for (int i = 0; i < timed_runs; i++) {
+      cudaMemset(d_sum, 0, sizeof(double) * count);
+      launch();
+    }
+  } else {
     cudaMemset(d_sum, 0, sizeof(double) * count);
-    launch();
+    for (int i = 0; i < timed_runs; i++) {
+      launch();
+    }
   }
   cudaEventRecord(stop);
   cudaEventSynchronize(stop);
@@ -269,8 +276,10 @@ int main(int argc, char *argv[]) {
   const unsigned int n1 = 2048;
   const unsigned int n2 = 2048;
 
-  const auto f = [] __device__(double x, double y) { return x * x; };
-  const double result = PI / 4;
+  const auto f = [] __device__(double x, double y) { return 1; };
+  const double result = PI ;
+  std::cout << std::fixed << std::setprecision(16);
+  std::cout << "Function " << "1" << " result " << result << "\n";
   double h_global_sum_slow = 0.0;
   double h_global_sum_fast = 0.0;
   double h_global_sum_reduction = 0.0;
@@ -366,7 +375,6 @@ int main(int argc, char *argv[]) {
       },
       d_ReductionSum, size_reduction);
 
-
   cudaMemcpy(&h_ReductionSum, d_ReductionSum, sizeof(double),
              cudaMemcpyDeviceToHost);
 
@@ -374,16 +382,14 @@ int main(int argc, char *argv[]) {
   // #############################################################
   // #############################################################
   // --- Print Results ---
-  std::cout << std::fixed << std::setprecision(16);
+
   std::cout << "Result slow: " << h_global_sum_slow << "\n";
   std::cout << "Result fast: " << h_global_sum_fast << "\n";
   std::cout << "Result reduction: " << h_global_sum_reduction << "\n";
-  std::cout << "Number of atomic adds in reduction: "
-            << h_number_of_atomics_adds << "\n";
   std::cout << "Result reduction without atomic: " << h_ReductionSum << "\n";
   std::cout << "Error Slow: " << std::abs(h_global_sum_slow - result) << "\n";
   std::cout << "Error fast: " << std::abs(h_global_sum_fast - result) << "\n";
-  std::cout << "Error reduction: " << std::abs(h_global_sum_reduction - result)
+  std::cout << "Error reduction: " << std::abs(result - h_global_sum_reduction)
             << "\n";
   std::cout << "Error reduction without atomic: "
             << std::abs(h_ReductionSum - result) << "\n";
@@ -394,16 +400,16 @@ int main(int argc, char *argv[]) {
   std::cout << "New (16x16 blocks):  " << time_new_ms << " ms\n";
   std::cout << "New Reduction (16x16 blocks):  " << time_new_ms_reduction
             << " ms\n";
-  //  std::cout << "New Reduction without atomic(16x16 blocks):  "
-  //            << time_new_ms_reduction_without_atomic << "ms\n";
+  std::cout << "New Reduction without atomic(16x16 blocks):  "
+            << time_new_ms_reduction_without_atomic << "ms\n";
   std::cout << "--------------------------------------------------\n";
   std::cout << "Speedup:             " << (time_old_ms / time_new_ms)
             << "x faster\n";
   std::cout << "Speedup:             " << (time_new_ms / time_new_ms_reduction)
             << "x faster\n";
-  //  std::cout << "Total Speedup:             "
-  //            << (time_old_ms / time_new_ms_reduction_without_atomic)
-  //            << "x faster\n";
+  std::cout << "Total Speedup:             "
+            << (time_old_ms / time_new_ms_reduction_without_atomic)
+            << "x faster\n";
 
   cudaFree(d_ReductionSum);
   cudaFree(d_number_of_atomics_adds);
